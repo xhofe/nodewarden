@@ -4,6 +4,7 @@ import {
   getProfile,
   loadSession,
   loginWithPassword,
+  loginWithPasskey,
   refreshAccessToken,
   recoverTwoFactor,
   registerAccount,
@@ -229,7 +230,7 @@ export async function bootstrapAppSession(initial: InitialAppBootstrapState = re
 export async function completeLogin(
   token: TokenSuccess,
   email: string,
-  masterKey: Uint8Array
+  masterKey?: Uint8Array
 ): Promise<CompletedLogin> {
   const normalizedEmail = email.trim().toLowerCase();
   const baseSession: SessionState = {
@@ -245,12 +246,34 @@ export async function completeLogin(
   if (!profile.key) {
     throw new Error('Missing profile key');
   }
-  const keys = await unlockVaultKey(profile.key, masterKey);
+  let keys: { symEncKey: string; symMacKey: string };
+  const passkeySymEncKey = (token as any).passkeySymEncKey;
+  const passkeySymMacKey = (token as any).passkeySymMacKey;
+  if (passkeySymEncKey && passkeySymMacKey) {
+    keys = { symEncKey: String(passkeySymEncKey), symMacKey: String(passkeySymMacKey) };
+  } else if (masterKey) {
+    keys = await unlockVaultKey(profile.key, masterKey);
+  } else {
+    throw new Error('Missing vault unlock material');
+  }
   return {
     session: { ...baseSession, ...keys },
     profile,
     profilePromise: getProfile(tempFetch),
   };
+}
+
+export async function performPasskeyLogin(totpCode?: string, twoFactorProvider?: string): Promise<PasswordLoginResult> {
+  const token = await loginWithPasskey({ totpCode, twoFactorProvider });
+  if ('access_token' in token && token.access_token) {
+    const email = ((token as any).email as string | undefined) || '';
+    return { kind: 'success', login: await completeLogin(token, email) };
+  }
+  const tokenError = token as { TwoFactorProviders?: unknown; error_description?: string; error?: string };
+  if (tokenError.TwoFactorProviders) {
+    return { kind: 'totp', pendingTotp: { email: '', passwordHash: '', masterKey: new Uint8Array() } };
+  }
+  return { kind: 'error', message: tokenError.error_description || tokenError.error || 'Passkey login failed' };
 }
 
 export async function performPasswordLogin(
@@ -292,6 +315,14 @@ export async function performTotpLogin(
   totpCode: string,
   rememberDevice: boolean
 ): Promise<CompletedLogin> {
+  if (!pendingTotp.email || !pendingTotp.passwordHash) {
+    const token = await loginWithPasskey({ totpCode: totpCode.trim(), twoFactorProvider: '0' });
+    if ('access_token' in token && token.access_token) {
+      return completeLogin(token, '');
+    }
+    const tokenError = token as { error_description?: string; error?: string };
+    throw new Error(tokenError.error_description || tokenError.error || 'TOTP verify failed');
+  }
   const token = await loginWithPassword(pendingTotp.email, pendingTotp.passwordHash, {
     totpCode: totpCode.trim(),
     rememberDevice,

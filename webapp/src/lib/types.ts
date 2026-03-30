@@ -290,6 +290,8 @@ export interface TokenSuccess {
   unofficialServer?: boolean;
   UserDecryptionOptions?: unknown;
   userDecryptionOptions?: unknown;
+  passkeySymEncKey?: string;
+  passkeySymMacKey?: string;
 }
 
 export interface TokenError {

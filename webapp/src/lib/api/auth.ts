@@ -1,4 +1,5 @@
 import { bytesToBase64, decryptBw, encryptBw, hkdfExpand, pbkdf2 } from '../crypto';
+import { createPasskeyCredential, getPasskeyAssertion } from '../passkey';
 import { t } from '../i18n';
 import type { AuthorizedDevice } from '../types';
 import type {
@@ -24,6 +25,14 @@ export interface PreloginKdfConfig {
   kdfIterations: number;
   kdfMemory: number | null;
   kdfParallelism: number | null;
+}
+
+export interface AccountPasskey {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt: string | null;
 }
 
 function randomHex(length: number): string {
@@ -181,6 +190,77 @@ export async function loginWithPassword(
   }
   if (!resp.ok) return json;
   return json;
+}
+
+export async function loginWithPasskey(options?: { totpCode?: string; twoFactorProvider?: string }): Promise<TokenSuccess | TokenError> {
+  const optResp = await fetch('/identity/passkeys/login/options', { method: 'POST' });
+  const optJson = (await parseJson<any>(optResp)) || {};
+  if (!optResp.ok) return { error: 'passkey_options_failed' };
+  const credential = await getPasskeyAssertion(optJson);
+  const verifyResp = await fetch('/identity/passkeys/login/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      challengeId: optJson.challengeId,
+      credential,
+      twoFactorProvider: options?.twoFactorProvider,
+      twoFactorToken: options?.totpCode,
+    }),
+  });
+  return (await parseJson<TokenSuccess & TokenError>(verifyResp)) || {};
+}
+
+export async function listPasskeys(authedFetch: AuthedFetch): Promise<AccountPasskey[]> {
+  const resp = await authedFetch('/api/accounts/passkeys');
+  if (!resp.ok) throw new Error('Failed to load passkeys');
+  const body = await parseJson<{ data?: AccountPasskey[] }>(resp);
+  return body?.data || [];
+}
+
+export async function registerPasskey(authedFetch: AuthedFetch, name: string, symEncKey: string, symMacKey: string): Promise<void> {
+  const optionsResp = await authedFetch('/api/accounts/passkeys/register/options', { method: 'POST' });
+  if (!optionsResp.ok) throw new Error('Failed to start passkey registration');
+  const options = await parseJson<any>(optionsResp);
+  const credential = await createPasskeyCredential(options || {});
+  const verifyResp = await authedFetch('/api/accounts/passkeys/register/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ challengeId: options?.challengeId, name, credential, vaultEncKey: symEncKey, vaultMacKey: symMacKey }),
+  });
+  if (!verifyResp.ok) {
+    const body = await parseJson<TokenError>(verifyResp);
+    throw new Error(body?.error_description || body?.error || 'Failed to register passkey');
+  }
+}
+
+export async function renamePasskey(authedFetch: AuthedFetch, id: string, name: string): Promise<void> {
+  const resp = await authedFetch(`/api/accounts/passkeys/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  if (!resp.ok) throw new Error('Failed to rename passkey');
+}
+
+export async function deletePasskey(authedFetch: AuthedFetch, id: string): Promise<void> {
+  const resp = await authedFetch(`/api/accounts/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (!resp.ok && resp.status !== 204) throw new Error('Failed to delete passkey');
+}
+
+export async function unlockWithPasskey(authedFetch: AuthedFetch): Promise<{ symEncKey: string; symMacKey: string }> {
+  const optionsResp = await authedFetch('/api/accounts/passkeys/unlock/options', { method: 'POST' });
+  if (!optionsResp.ok) throw new Error('Failed to start passkey unlock');
+  const options = await parseJson<any>(optionsResp);
+  const credential = await getPasskeyAssertion(options || {});
+  const verifyResp = await authedFetch('/api/accounts/passkeys/unlock/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ challengeId: options?.challengeId, credential }),
+  });
+  if (!verifyResp.ok) throw new Error('Passkey unlock failed');
+  const body = await parseJson<{ symEncKey?: string; symMacKey?: string }>(verifyResp);
+  if (!body?.symEncKey || !body?.symMacKey) throw new Error('Passkey unlock failed');
+  return { symEncKey: body.symEncKey, symMacKey: body.symMacKey };
 }
 
 export async function refreshAccessToken(refreshToken: string): Promise<TokenSuccess | null> {

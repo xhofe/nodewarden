@@ -1,5 +1,6 @@
-import { User, Cipher, Folder, Attachment, Device, Invite, AuditLog, Send, TrustedDeviceTokenSummary, RefreshTokenRecord } from '../types';
+import { User, Cipher, Folder, Attachment, Device, Invite, AuditLog, Send, TrustedDeviceTokenSummary, RefreshTokenRecord, PasskeyCredential } from '../types';
 import { LIMITS } from '../config/limits';
+import { generateUUID } from '../utils/uuid';
 import { ensureStorageSchema } from './storage-schema';
 import {
   getConfigValue as getStoredConfigValue,
@@ -588,6 +589,106 @@ export class StorageService {
 
   async getTrustedTwoFactorDeviceTokenUserId(token: string, deviceIdentifier: string): Promise<string | null> {
     return findStoredTrustedTokenUserId(this.db, this.trustedTwoFactorTokenKey.bind(this), token, deviceIdentifier);
+  }
+
+  // --- Passkeys ---
+
+  async createPasskeyChallenge(action: string, challenge: string, userId: string | null, origin: string, rpId: string, ttlMs: number): Promise<string> {
+    const id = generateUUID();
+    const nowIso = new Date().toISOString();
+    await this.db
+      .prepare('INSERT INTO passkey_challenges(id, challenge, action, user_id, expires_at, created_at, origin, rp_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(id, challenge, action, userId, Date.now() + ttlMs, nowIso, origin, rpId)
+      .run();
+    return id;
+  }
+
+  async consumePasskeyChallenge(id: string, action: string): Promise<{ challenge: string; userId: string | null; origin: string; rpId: string } | null> {
+    const row = await this.db
+      .prepare('SELECT challenge, user_id, origin, rp_id, expires_at FROM passkey_challenges WHERE id = ? AND action = ?')
+      .bind(id, action)
+      .first<{ challenge: string; user_id: string | null; origin: string | null; rp_id: string | null; expires_at: number }>();
+    await this.db.prepare('DELETE FROM passkey_challenges WHERE id = ?').bind(id).run();
+    if (!row || row.expires_at < Date.now() || !row.origin || !row.rp_id) return null;
+    return { challenge: row.challenge, userId: row.user_id ?? null, origin: row.origin, rpId: row.rp_id };
+  }
+
+  async listPasskeysByUserId(userId: string): Promise<PasskeyCredential[]> {
+    const res = await this.db
+      .prepare('SELECT id, user_id, credential_id, public_key_spki, algorithm, counter, transports, name, rp_id, vault_enc_key, vault_mac_key, created_at, updated_at, last_used_at FROM passkeys WHERE user_id = ? ORDER BY updated_at DESC')
+      .bind(userId)
+      .all<any>();
+    return (res.results || []).map((row) => ({
+      id: row.id,
+      userId: row.user_id,
+      credentialId: row.credential_id,
+      publicKeySpki: row.public_key_spki,
+      algorithm: Number(row.algorithm || -7),
+      counter: Number(row.counter || 0),
+      transports: row.transports ?? null,
+      name: row.name,
+      rpId: row.rp_id,
+      vaultEncKey: row.vault_enc_key,
+      vaultMacKey: row.vault_mac_key,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      lastUsedAt: row.last_used_at ?? null,
+    }));
+  }
+
+  async getPasskeyByCredentialId(credentialId: string): Promise<PasskeyCredential | null> {
+    const row = await this.db
+      .prepare('SELECT id, user_id, credential_id, public_key_spki, algorithm, counter, transports, name, rp_id, vault_enc_key, vault_mac_key, created_at, updated_at, last_used_at FROM passkeys WHERE credential_id = ?')
+      .bind(credentialId)
+      .first<any>();
+    if (!row) return null;
+    return {
+      id: row.id,
+      userId: row.user_id,
+      credentialId: row.credential_id,
+      publicKeySpki: row.public_key_spki,
+      algorithm: Number(row.algorithm || -7),
+      counter: Number(row.counter || 0),
+      transports: row.transports ?? null,
+      name: row.name,
+      rpId: row.rp_id,
+      vaultEncKey: row.vault_enc_key,
+      vaultMacKey: row.vault_mac_key,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      lastUsedAt: row.last_used_at ?? null,
+    };
+  }
+
+  async createPasskey(record: Omit<PasskeyCredential, 'id' | 'createdAt' | 'updatedAt' | 'lastUsedAt'>): Promise<string> {
+    const id = generateUUID();
+    const now = new Date().toISOString();
+    await this.db
+      .prepare('INSERT INTO passkeys(id, user_id, credential_id, public_key_spki, algorithm, counter, transports, name, rp_id, vault_enc_key, vault_mac_key, created_at, updated_at, last_used_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(id, record.userId, record.credentialId, record.publicKeySpki, record.algorithm, record.counter, record.transports, record.name, record.rpId, record.vaultEncKey, record.vaultMacKey, now, now, null)
+      .run();
+    return id;
+  }
+
+  async updatePasskeyName(userId: string, passkeyId: string, name: string): Promise<boolean> {
+    const result = await this.db
+      .prepare('UPDATE passkeys SET name = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+      .bind(name, new Date().toISOString(), passkeyId, userId)
+      .run();
+    return Number(result.meta.changes || 0) > 0;
+  }
+
+  async deletePasskey(userId: string, passkeyId: string): Promise<boolean> {
+    const result = await this.db.prepare('DELETE FROM passkeys WHERE id = ? AND user_id = ?').bind(passkeyId, userId).run();
+    return Number(result.meta.changes || 0) > 0;
+  }
+
+  async touchPasskeyUsage(passkeyId: string, nextCounter: number): Promise<void> {
+    const now = new Date().toISOString();
+    await this.db
+      .prepare('UPDATE passkeys SET counter = ?, updated_at = ?, last_used_at = ? WHERE id = ?')
+      .bind(nextCounter, now, now, passkeyId)
+      .run();
   }
 
   // --- Revision dates ---

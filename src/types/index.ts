@@ -245,6 +245,23 @@ export interface TrustedDeviceTokenSummary {
   tokenCount: number;
 }
 
+export interface PasskeyCredential {
+  id: string;
+  userId: string;
+  credentialId: string;
+  publicKeySpki: string;
+  algorithm: number;
+  counter: number;
+  transports: string | null;
+  name: string;
+  rpId: string;
+  vaultEncKey: string;
+  vaultMacKey: string;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt: string | null;
+}
+
 export enum SendType {
   Text = 0,
   File = 1,

@@ -14,6 +14,7 @@ import {
   buildAccountKeys,
   buildUserDecryptionOptions,
 } from '../utils/user-decryption';
+import { bytesToBase64Url, parseClientData, readAuthenticatorCounter, verifyAssertionSignature } from '../utils/passkey';
 
 const TWO_FACTOR_REMEMBER_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const TWO_FACTOR_PROVIDER_AUTHENTICATOR = 0;
@@ -476,4 +477,104 @@ export async function handleRevocation(request: Request, env: Env): Promise<Resp
   }
 
   return new Response(null, { status: 200 });
+}
+
+export async function handlePasskeyLoginOptions(request: Request, env: Env): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const url = new URL(request.url);
+  const challenge = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+  const challengeId = await storage.createPasskeyChallenge('login', challenge, null, url.origin, url.hostname, 5 * 60 * 1000);
+  return jsonResponse({ challengeId, challenge, rpId: url.hostname, timeout: 60000, userVerification: 'preferred' });
+}
+
+export async function handlePasskeyLoginVerify(request: Request, env: Env): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const auth = new AuthService(env);
+  let body: { challengeId?: string; credential?: any; twoFactorToken?: string; twoFactorProvider?: string };
+  try {
+    body = await request.json();
+  } catch {
+    return identityErrorResponse('Invalid request payload', 'invalid_request', 400);
+  }
+  const challengeData = await storage.consumePasskeyChallenge(String(body.challengeId || ''), 'login');
+  if (!challengeData) return identityErrorResponse('Passkey challenge expired', 'invalid_grant', 400);
+
+  const credential = body.credential || {};
+  const response = credential.response || {};
+  const clientData = parseClientData(String(response.clientDataJSON || ''));
+  if (!clientData || clientData.challenge !== challengeData.challenge || clientData.origin !== challengeData.origin || clientData.type !== 'webauthn.get') {
+    return identityErrorResponse('Invalid passkey assertion', 'invalid_grant', 400);
+  }
+  const passkey = await storage.getPasskeyByCredentialId(String(credential.id || credential.rawId || ''));
+  if (!passkey) return identityErrorResponse('Passkey not registered', 'invalid_grant', 400);
+  const user = await storage.getUserById(passkey.userId);
+  if (!user || user.status !== 'active') return identityErrorResponse('Account is disabled', 'invalid_grant', 400);
+
+  const verified = await verifyAssertionSignature({
+    algorithm: passkey.algorithm,
+    publicKeySpkiB64: passkey.publicKeySpki,
+    authenticatorDataB64u: String(response.authenticatorData || ''),
+    clientDataJSONB64u: String(response.clientDataJSON || ''),
+    signatureB64u: String(response.signature || ''),
+  });
+  if (!verified) return identityErrorResponse('Invalid passkey signature', 'invalid_grant', 400);
+  const nextCounter = readAuthenticatorCounter(String(response.authenticatorData || ''));
+  if (passkey.counter > 0 && nextCounter > 0 && nextCounter <= passkey.counter) {
+    return identityErrorResponse('Passkey counter check failed', 'invalid_grant', 400);
+  }
+  await storage.touchPasskeyUsage(passkey.id, nextCounter || passkey.counter);
+
+  const effectiveTotpSecret = resolveTotpSecret(user.totpSecret);
+  if (effectiveTotpSecret) {
+    const provider = String(body.twoFactorProvider || '').trim();
+    const token = String(body.twoFactorToken || '').trim();
+    if (!provider || !token) return twoFactorRequiredResponse('Two factor required.', !!user.totpRecoveryCode);
+    if (provider === String(TWO_FACTOR_PROVIDER_AUTHENTICATOR)) {
+      const ok = await verifyTotpToken(effectiveTotpSecret, token);
+      if (!ok) return identityErrorResponse('Two-step token is invalid. Try again.', 'invalid_grant', 400);
+    } else if (
+      provider === TWO_FACTOR_PROVIDER_RECOVERY_CODE_RESPONSE ||
+      provider === String(TWO_FACTOR_PROVIDER_RECOVERY_CODE_LEGACY) ||
+      provider === String(TWO_FACTOR_PROVIDER_RECOVERY_CODE_ANDROID_REQUEST)
+    ) {
+      if (!recoveryCodeEquals(token, user.totpRecoveryCode)) {
+        return identityErrorResponse('Two-step token is invalid. Try again.', 'invalid_grant', 400);
+      }
+      user.totpSecret = null;
+      user.totpRecoveryCode = createRecoveryCode();
+      user.updatedAt = new Date().toISOString();
+      await storage.saveUser(user);
+      await storage.deleteRefreshTokensByUserId(user.id);
+    } else {
+      return identityErrorResponse('Two-step token is invalid. Try again.', 'invalid_grant', 400);
+    }
+  }
+
+  const accessToken = await auth.generateAccessToken(user, null);
+  const refreshToken = await auth.generateRefreshToken(user.id, null);
+  const responseBody: Record<string, unknown> = {
+    access_token: accessToken,
+    expires_in: LIMITS.auth.accessTokenTtlSeconds,
+    token_type: 'Bearer',
+    refresh_token: refreshToken,
+    Key: user.key,
+    PrivateKey: user.privateKey,
+    AccountKeys: buildAccountKeys(user),
+    accountKeys: buildAccountKeys(user),
+    Kdf: user.kdfType,
+    KdfIterations: user.kdfIterations,
+    KdfMemory: user.kdfMemory,
+    KdfParallelism: user.kdfParallelism,
+    ForcePasswordReset: false,
+    ResetMasterPassword: false,
+    MasterPasswordPolicy: { Object: 'masterPasswordPolicy' },
+    ApiUseKeyConnector: false,
+    scope: 'api offline_access',
+    unofficialServer: true,
+    UserDecryptionOptions: buildUserDecryptionOptions(user),
+    userDecryptionOptions: buildUserDecryptionOptions(user),
+    passkeySymEncKey: passkey.vaultEncKey,
+    passkeySymMacKey: passkey.vaultMacKey,
+  };
+  return jsonResponse(responseBody);
 }

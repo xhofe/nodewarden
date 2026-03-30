@@ -4,6 +4,7 @@ import { Link, Route, Switch } from 'wouter';
 import { ArrowUpDown, Cloud, LogOut, Settings as SettingsIcon, Shield, ShieldUser } from 'lucide-preact';
 import type { ImportAttachmentFile, ImportResultSummary } from '@/components/ImportPage';
 import type { AdminBackupImportResponse, AdminBackupRunResponse, AdminBackupSettings, RemoteBackupBrowserResponse } from '@/lib/api/backup';
+import type { AccountPasskey } from '@/lib/api/auth';
 import type { CiphersImportPayload } from '@/lib/api/vault';
 import { t } from '@/lib/i18n';
 import type { AdminInvite, AdminUser, AuthorizedDevice, Cipher, Folder as VaultFolder, Profile, Send, SendDraft, SessionState, VaultDraft } from '@/lib/types';
@@ -94,6 +95,10 @@ export interface AppMainRoutesProps {
   onEnableTotp: (secret: string, token: string) => Promise<void>;
   onOpenDisableTotp: () => void;
   onGetRecoveryCode: (masterPassword: string) => Promise<string>;
+  passkeys: AccountPasskey[];
+  onRegisterPasskey: (name: string) => Promise<void>;
+  onRenamePasskey: (id: string, name: string) => Promise<void>;
+  onDeletePasskey: (id: string) => Promise<void>;
   onRefreshAuthorizedDevices: () => Promise<void>;
   onRevokeDeviceTrust: (device: AuthorizedDevice) => void;
   onRemoveDevice: (device: AuthorizedDevice) => void;
@@ -225,6 +230,10 @@ export default function AppMainRoutes(props: AppMainRoutesProps) {
                 onOpenDisableTotp={props.onOpenDisableTotp}
                 onGetRecoveryCode={props.onGetRecoveryCode}
                 onNotify={props.onNotify}
+                passkeys={props.passkeys}
+                onRegisterPasskey={props.onRegisterPasskey}
+                onRenamePasskey={props.onRenamePasskey}
+                onDeletePasskey={props.onDeletePasskey}
               />
             </Suspense>
           </div>

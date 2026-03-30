@@ -88,6 +88,16 @@ const SCHEMA_STATEMENTS: readonly string[] = [
   'FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)',
   'CREATE INDEX IF NOT EXISTS idx_trusted_two_factor_device_tokens_user_device ON trusted_two_factor_device_tokens(user_id, device_identifier)',
 
+  'CREATE TABLE IF NOT EXISTS passkeys (' +
+  'id TEXT PRIMARY KEY, user_id TEXT NOT NULL, credential_id TEXT NOT NULL UNIQUE, public_key_spki TEXT NOT NULL, algorithm INTEGER NOT NULL, counter INTEGER NOT NULL DEFAULT 0, transports TEXT, name TEXT NOT NULL, rp_id TEXT NOT NULL, vault_enc_key TEXT NOT NULL, vault_mac_key TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_used_at TEXT, ' +
+  'FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)',
+  'CREATE INDEX IF NOT EXISTS idx_passkeys_user_updated ON passkeys(user_id, updated_at)',
+  'CREATE INDEX IF NOT EXISTS idx_passkeys_credential ON passkeys(credential_id)',
+
+  'CREATE TABLE IF NOT EXISTS passkey_challenges (' +
+  'id TEXT PRIMARY KEY, challenge TEXT NOT NULL, action TEXT NOT NULL, user_id TEXT, expires_at INTEGER NOT NULL, created_at TEXT NOT NULL, origin TEXT, rp_id TEXT)',
+  'CREATE INDEX IF NOT EXISTS idx_passkey_challenges_expires ON passkey_challenges(expires_at)',
+
   'CREATE TABLE IF NOT EXISTS api_rate_limits (' +
   'identifier TEXT NOT NULL, window_start INTEGER NOT NULL, count INTEGER NOT NULL, ' +
   'PRIMARY KEY (identifier, window_start))',

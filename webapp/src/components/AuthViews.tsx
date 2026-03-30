@@ -1,5 +1,5 @@
 import { useState } from 'preact/hooks';
-import { ArrowLeft, Eye, EyeOff, LogIn, LogOut, Unlock, UserPlus } from 'lucide-preact';
+import { ArrowLeft, Eye, EyeOff, KeyRound, LogIn, LogOut, Unlock, UserPlus } from 'lucide-preact';
 import StandalonePageFrame from '@/components/StandalonePageFrame';
 import { t } from '@/lib/i18n';
 
@@ -32,6 +32,8 @@ interface AuthViewsProps {
   onSubmitLogin: () => void;
   onSubmitRegister: () => void;
   onSubmitUnlock: () => void;
+  onSubmitPasskeyLogin: () => void;
+  onSubmitPasskeyUnlock: () => void;
   onGotoLogin: () => void;
   onGotoRegister: () => void;
   onLogout: () => void;
@@ -105,6 +107,10 @@ export default function AuthViews(props: AuthViewsProps) {
             <button type="submit" className="btn btn-primary full" disabled={unlockBusy || !props.unlockReady}>
               <Unlock size={16} className="btn-icon" />
               {unlockBusy ? t('txt_unlocking') : t('txt_unlock')}
+            </button>
+            <button type="button" className="btn btn-secondary full" onClick={props.onSubmitPasskeyUnlock} disabled={unlockBusy}>
+              <KeyRound size={16} className="btn-icon" />
+              {t('Passkey Unlock')}
             </button>
             <div className="or">{t('txt_or')}</div>
             <button type="button" className="btn btn-secondary full" onClick={props.onLogout} disabled={unlockBusy}>
@@ -242,6 +248,10 @@ export default function AuthViews(props: AuthViewsProps) {
           <button type="submit" className="btn btn-primary full" disabled={loginBusy}>
             <LogIn size={16} className="btn-icon" />
             {loginBusy ? t('txt_logging_in') : t('txt_log_in')}
+          </button>
+          <button type="button" className="btn btn-secondary full" onClick={props.onSubmitPasskeyLogin} disabled={loginBusy}>
+            <KeyRound size={16} className="btn-icon" />
+            {t('Passkey Login')}
           </button>
           <div className="or">{t('txt_or')}</div>
           <button type="button" className="btn btn-secondary full" onClick={props.onGotoRegister} disabled={loginBusy}>

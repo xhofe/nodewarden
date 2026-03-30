@@ -8,7 +8,7 @@ import {
   handleDownloadSendFile,
 } from './handlers/sends';
 import { handleKnownDevice } from './handlers/devices';
-import { handleToken, handlePrelogin, handleRevocation } from './handlers/identity';
+import { handleToken, handlePrelogin, handleRevocation, handlePasskeyLoginOptions, handlePasskeyLoginVerify } from './handlers/identity';
 import {
   handleRegister,
   handleGetPasswordHint,
@@ -272,6 +272,12 @@ export async function handlePublicRoute(
 
   if (path === '/identity/connect/token' && method === 'POST') {
     return handleToken(request, env);
+  }
+  if (path === '/identity/passkeys/login/options' && method === 'POST') {
+    return handlePasskeyLoginOptions(request, env);
+  }
+  if (path === '/identity/passkeys/login/verify' && method === 'POST') {
+    return handlePasskeyLoginVerify(request, env);
   }
 
   if (path === '/api/devices/knowndevice' && method === 'GET') {

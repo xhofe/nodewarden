@@ -12,8 +12,13 @@ import {
   getAuthorizedDevices,
   getCurrentDeviceIdentifier,
   getPasswordHint,
+  listPasskeys,
+  registerPasskey,
+  renamePasskey,
+  deletePasskey,
   getTotpStatus,
   saveSession,
+  unlockWithPasskey,
 } from '@/lib/api/auth';
 import { listAdminInvites, listAdminUsers } from '@/lib/api/admin';
 import { buildSendShareKey, getSends } from '@/lib/api/send';
@@ -36,6 +41,7 @@ import {
   type CompletedLogin,
   readInitialAppBootstrapState,
   performPasswordLogin,
+  performPasskeyLogin,
   performRecoverTwoFactorLogin,
   performRegistration,
   performTotpLogin,
@@ -378,6 +384,29 @@ export default function App() {
     }
   }
 
+  async function handlePasskeyLogin() {
+    if (pendingAuthAction) return;
+    setPendingAuthAction('login');
+    try {
+      const result = await performPasskeyLogin();
+      if (result.kind === 'success') {
+        await finalizeLogin(result.login);
+        return;
+      }
+      if (result.kind === 'totp') {
+        setPendingTotp(result.pendingTotp);
+        setTotpCode('');
+        setRememberDevice(false);
+        return;
+      }
+      pushToast('error', result.message || t('txt_login_failed'));
+    } catch (error) {
+      pushToast('error', error instanceof Error ? error.message : t('txt_login_failed'));
+    } finally {
+      setPendingAuthAction(null);
+    }
+  }
+
   async function handleTotpVerify() {
     if (!pendingTotp) return;
     if (!totpCode.trim()) {
@@ -527,6 +556,24 @@ export default function App() {
     }
   }
 
+  async function handlePasskeyUnlock() {
+    if (pendingAuthAction) return;
+    if (!session) return;
+    setPendingAuthAction('unlock');
+    try {
+      const keys = await unlockWithPasskey(authedFetch);
+      const nextSession = { ...session, ...keys };
+      setSession(nextSession);
+      setPhase('app');
+      if (location === '/' || location === '/lock') navigate('/vault');
+      pushToast('success', t('txt_unlocked'));
+    } catch (error) {
+      pushToast('error', error instanceof Error ? error.message : 'Passkey unlock failed');
+    } finally {
+      setPendingAuthAction(null);
+    }
+  }
+
   function handleLock() {
     if (!session) return;
     const nextSession = { ...session };
@@ -555,6 +602,22 @@ export default function App() {
         logoutNow();
       },
     });
+  }
+
+  async function handleRegisterPasskey(name: string) {
+    if (!session?.symEncKey || !session?.symMacKey) throw new Error('Vault is locked');
+    await registerPasskey(authedFetch, name, session.symEncKey, session.symMacKey);
+    await passkeysQuery.refetch();
+  }
+
+  async function handleRenamePasskey(id: string, name: string) {
+    await renamePasskey(authedFetch, id, name);
+    await passkeysQuery.refetch();
+  }
+
+  async function handleDeletePasskey(id: string) {
+    await deletePasskey(authedFetch, id);
+    await passkeysQuery.refetch();
   }
 
   function renderPassiveOverlays() {
@@ -614,6 +677,11 @@ export default function App() {
   const authorizedDevicesQuery = useQuery({
     queryKey: ['authorized-devices', session?.accessToken],
     queryFn: () => getAuthorizedDevices(authedFetch),
+    enabled: phase === 'app' && !!session?.accessToken,
+  });
+  const passkeysQuery = useQuery({
+    queryKey: ['passkeys', session?.accessToken],
+    queryFn: () => listPasskeys(authedFetch),
     enabled: phase === 'app' && !!session?.accessToken,
   });
 
@@ -1139,6 +1207,10 @@ export default function App() {
     },
     onOpenDisableTotp: () => setDisableTotpOpen(true),
     onGetRecoveryCode: accountSecurityActions.getRecoveryCode,
+    passkeys: passkeysQuery.data || [],
+    onRegisterPasskey: handleRegisterPasskey,
+    onRenamePasskey: handleRenamePasskey,
+    onDeletePasskey: handleDeletePasskey,
     onRefreshAuthorizedDevices: accountSecurityActions.refreshAuthorizedDevices,
     onRevokeDeviceTrust: accountSecurityActions.openRevokeDeviceTrust,
     onRemoveDevice: accountSecurityActions.openRemoveDevice,
@@ -1210,8 +1282,10 @@ export default function App() {
           onChangeRegister={setRegisterValues}
           onChangeUnlock={setUnlockPassword}
           onSubmitLogin={() => void handleLogin()}
+          onSubmitPasskeyLogin={() => void handlePasskeyLogin()}
           onSubmitRegister={() => void handleRegister()}
           onSubmitUnlock={() => void handleUnlock()}
+          onSubmitPasskeyUnlock={() => void handlePasskeyUnlock()}
           onGotoLogin={() => {
             setPhase('login');
             navigate('/login');

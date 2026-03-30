@@ -11,6 +11,13 @@ import {
   handleGetTotpStatus,
   handleSetTotpStatus,
   handleGetTotpRecoveryCode,
+  handleListPasskeys,
+  handlePasskeyRegisterOptions,
+  handlePasskeyRegisterVerify,
+  handlePasskeyRename,
+  handlePasskeyDelete,
+  handlePasskeyUnlockOptions,
+  handlePasskeyUnlockVerify,
 } from './handlers/accounts';
 import {
   handleGetCiphers,
@@ -109,6 +116,27 @@ export async function handleAuthenticatedRoute(
 
   if (path === '/api/accounts/revision-date' && method === 'GET') {
     return handleGetRevisionDate(request, env, userId);
+  }
+
+  if (path === '/api/accounts/passkeys' && method === 'GET') {
+    return handleListPasskeys(request, env, userId);
+  }
+  if (path === '/api/accounts/passkeys/register/options' && method === 'POST') {
+    return handlePasskeyRegisterOptions(request, env, userId);
+  }
+  if (path === '/api/accounts/passkeys/register/verify' && method === 'POST') {
+    return handlePasskeyRegisterVerify(request, env, userId);
+  }
+  if (path === '/api/accounts/passkeys/unlock/options' && method === 'POST') {
+    return handlePasskeyUnlockOptions(request, env, userId);
+  }
+  if (path === '/api/accounts/passkeys/unlock/verify' && method === 'POST') {
+    return handlePasskeyUnlockVerify(request, env, userId);
+  }
+  const passkeyMatch = path.match(/^\/api\/accounts\/passkeys\/([a-f0-9-]+)$/i);
+  if (passkeyMatch) {
+    if (method === 'PUT' || method === 'POST') return handlePasskeyRename(request, env, userId, passkeyMatch[1]);
+    if (method === 'DELETE') return handlePasskeyDelete(request, env, userId, passkeyMatch[1]);
   }
 
   if (path === '/api/accounts/verify-password' && method === 'POST') {

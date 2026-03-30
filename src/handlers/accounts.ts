@@ -7,6 +7,7 @@ import { generateUUID } from '../utils/uuid';
 import { LIMITS } from '../config/limits';
 import { isTotpEnabled, verifyTotpToken } from '../utils/totp';
 import { createRecoveryCode, recoveryCodeEquals } from '../utils/recovery-code';
+import { base64UrlToBytes, bytesToBase64Url, parseClientData, readAuthenticatorCounter, verifyAssertionSignature } from '../utils/passkey';
 import { buildAccountKeys } from '../utils/user-decryption';
 
 function looksLikeEncString(value: string): boolean {
@@ -113,6 +114,27 @@ function toProfile(user: User, env: Env): ProfileResponse {
     status: user.status,
     object: 'profile',
   };
+}
+
+interface PasskeyAssertionRequest {
+  id?: string;
+  rawId?: string;
+  response?: {
+    clientDataJSON?: string;
+    authenticatorData?: string;
+    signature?: string;
+  };
+  type?: string;
+}
+
+function getPasskeyOriginAndRpId(request: Request): { origin: string; rpId: string } {
+  const url = new URL(request.url);
+  return { origin: url.origin, rpId: url.hostname };
+}
+
+function randomPasskeyChallenge(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return bytesToBase64Url(bytes);
 }
 
 // POST /api/accounts/register
@@ -709,6 +731,176 @@ export async function handleRecoverTwoFactor(request: Request, env: Env): Promis
     newRecoveryCode: user.totpRecoveryCode,
     object: 'twoFactorRecovery',
   });
+}
+
+// GET /api/accounts/passkeys
+export async function handleListPasskeys(request: Request, env: Env, userId: string): Promise<Response> {
+  void request;
+  const storage = new StorageService(env.DB);
+  const rows = await storage.listPasskeysByUserId(userId);
+  return jsonResponse({
+    object: 'list',
+    data: rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      lastUsedAt: row.lastUsedAt,
+      transports: row.transports ? row.transports.split(',').filter(Boolean) : [],
+      object: 'passkey',
+    })),
+  });
+}
+
+// POST /api/accounts/passkeys/register/options
+export async function handlePasskeyRegisterOptions(request: Request, env: Env, userId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+  const { origin, rpId } = getPasskeyOriginAndRpId(request);
+  const challenge = randomPasskeyChallenge();
+  const challengeId = await storage.createPasskeyChallenge('register', challenge, user.id, origin, rpId, 5 * 60 * 1000);
+  const existing = await storage.listPasskeysByUserId(user.id);
+  return jsonResponse({
+    challengeId,
+    publicKey: {
+      challenge,
+      rp: { id: rpId, name: 'NodeWarden' },
+      user: {
+        id: bytesToBase64Url(new TextEncoder().encode(user.id)),
+        name: user.email,
+        displayName: user.name || user.email,
+      },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+      timeout: 60000,
+      authenticatorSelection: { residentKey: 'preferred', userVerification: 'preferred' },
+      attestation: 'none',
+      excludeCredentials: existing.map((item) => ({ id: item.credentialId, type: 'public-key' })),
+    },
+  });
+}
+
+// POST /api/accounts/passkeys/register/verify
+export async function handlePasskeyRegisterVerify(request: Request, env: Env, userId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  let body: { challengeId?: string; name?: string; credential?: any; vaultEncKey?: string; vaultMacKey?: string };
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON', 400);
+  }
+
+  const challengeData = await storage.consumePasskeyChallenge(String(body.challengeId || ''), 'register');
+  if (!challengeData || challengeData.userId !== userId) return errorResponse('Challenge expired', 400);
+
+  const credential = body.credential || {};
+  const response = credential.response || {};
+  const clientData = parseClientData(String(response.clientDataJSON || ''));
+  if (!clientData || clientData.challenge !== challengeData.challenge || clientData.origin !== challengeData.origin || clientData.type !== 'webauthn.create') {
+    return errorResponse('Invalid passkey registration response', 400);
+  }
+
+  const credentialId = String(credential.id || credential.rawId || '').trim();
+  const publicKeySpki = String(response.publicKey || '').trim();
+  const algorithm = Number(response.publicKeyAlgorithm || -7);
+  const name = String(body.name || '').trim().slice(0, 64) || 'Passkey';
+  if (!credentialId || !publicKeySpki || !body.vaultEncKey || !body.vaultMacKey) {
+    return errorResponse('Missing passkey fields', 400);
+  }
+  const current = await storage.listPasskeysByUserId(userId);
+  if (current.length >= 5) return errorResponse('At most 5 passkeys are allowed', 400);
+
+  try {
+    await storage.createPasskey({
+      userId,
+      credentialId,
+      publicKeySpki,
+      algorithm,
+      counter: readAuthenticatorCounter(String(response.authenticatorData || '')),
+      transports: Array.isArray(response.transports) ? response.transports.join(',') : null,
+      name,
+      rpId: challengeData.rpId,
+      vaultEncKey: String(body.vaultEncKey),
+      vaultMacKey: String(body.vaultMacKey),
+    });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+    if (msg.includes('unique')) return errorResponse('This passkey is already registered', 409);
+    throw error;
+  }
+
+  return jsonResponse({ success: true, object: 'passkey' });
+}
+
+// PUT /api/accounts/passkeys/:id
+export async function handlePasskeyRename(request: Request, env: Env, userId: string, passkeyId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  let body: { name?: string };
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON', 400);
+  }
+  const name = String(body.name || '').trim().slice(0, 64);
+  if (!name) return errorResponse('Name is required', 400);
+  const updated = await storage.updatePasskeyName(userId, passkeyId, name);
+  if (!updated) return errorResponse('Passkey not found', 404);
+  return jsonResponse({ success: true });
+}
+
+// DELETE /api/accounts/passkeys/:id
+export async function handlePasskeyDelete(request: Request, env: Env, userId: string, passkeyId: string): Promise<Response> {
+  void request;
+  const storage = new StorageService(env.DB);
+  const deleted = await storage.deletePasskey(userId, passkeyId);
+  if (!deleted) return errorResponse('Passkey not found', 404);
+  return new Response(null, { status: 204 });
+}
+
+// POST /api/accounts/passkeys/unlock/options
+export async function handlePasskeyUnlockOptions(request: Request, env: Env, userId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const { origin, rpId } = getPasskeyOriginAndRpId(request);
+  const challenge = randomPasskeyChallenge();
+  const challengeId = await storage.createPasskeyChallenge('unlock', challenge, userId, origin, rpId, 5 * 60 * 1000);
+  return jsonResponse({ challengeId, challenge, rpId, timeout: 60000, userVerification: 'preferred' });
+}
+
+// POST /api/accounts/passkeys/unlock/verify
+export async function handlePasskeyUnlockVerify(request: Request, env: Env, userId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  let body: { challengeId?: string; credential?: PasskeyAssertionRequest };
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON', 400);
+  }
+  const challengeData = await storage.consumePasskeyChallenge(String(body.challengeId || ''), 'unlock');
+  if (!challengeData || challengeData.userId !== userId) return errorResponse('Challenge expired', 400);
+
+  const credential = body.credential || {};
+  const response = credential.response || {};
+  const clientData = parseClientData(String(response.clientDataJSON || ''));
+  if (!clientData || clientData.challenge !== challengeData.challenge || clientData.origin !== challengeData.origin || clientData.type !== 'webauthn.get') {
+    return errorResponse('Invalid passkey assertion', 400);
+  }
+
+  const passkey = await storage.getPasskeyByCredentialId(String(credential.id || credential.rawId || ''));
+  if (!passkey || passkey.userId !== userId) return errorResponse('Passkey not found', 404);
+  const verified = await verifyAssertionSignature({
+    algorithm: passkey.algorithm,
+    publicKeySpkiB64: passkey.publicKeySpki,
+    authenticatorDataB64u: String(response.authenticatorData || ''),
+    clientDataJSONB64u: String(response.clientDataJSON || ''),
+    signatureB64u: String(response.signature || ''),
+  });
+  if (!verified) return errorResponse('Invalid passkey signature', 400);
+  const nextCounter = readAuthenticatorCounter(String(response.authenticatorData || ''));
+  if (passkey.counter > 0 && nextCounter > 0 && nextCounter <= passkey.counter) {
+    return errorResponse('Passkey counter check failed', 400);
+  }
+  await storage.touchPasskeyUsage(passkey.id, nextCounter || passkey.counter);
+  return jsonResponse({ symEncKey: passkey.vaultEncKey, symMacKey: passkey.vaultMacKey });
 }
 
 // GET /api/accounts/revision-date

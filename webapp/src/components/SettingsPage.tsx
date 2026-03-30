@@ -3,6 +3,7 @@ import { Clipboard, KeyRound, RefreshCw, ShieldCheck, ShieldOff } from 'lucide-p
 import { copyTextToClipboard } from '@/lib/clipboard';
 import qrcode from 'qrcode-generator';
 import type { Profile } from '@/lib/types';
+import type { AccountPasskey } from '@/lib/api/auth';
 import { t } from '@/lib/i18n';
 
 interface SettingsPageProps {
@@ -14,6 +15,10 @@ interface SettingsPageProps {
   onOpenDisableTotp: () => void;
   onGetRecoveryCode: (masterPassword: string) => Promise<string>;
   onNotify?: (type: 'success' | 'error', text: string) => void;
+  passkeys: AccountPasskey[];
+  onRegisterPasskey: (name: string) => Promise<void>;
+  onRenamePasskey: (id: string, name: string) => Promise<void>;
+  onDeletePasskey: (id: string) => Promise<void>;
 }
 
 function randomBase32Secret(length: number): string {
@@ -47,6 +52,7 @@ export default function SettingsPage(props: SettingsPageProps) {
   const [totpLocked, setTotpLocked] = useState(props.totpEnabled);
   const [recoveryMasterPassword, setRecoveryMasterPassword] = useState('');
   const [recoveryCode, setRecoveryCode] = useState('');
+  const [passkeyName, setPasskeyName] = useState('');
 
   useEffect(() => {
     if (!props.totpEnabled) {
@@ -138,6 +144,40 @@ export default function SettingsPage(props: SettingsPageProps) {
           <KeyRound size={14} className="btn-icon" />
           {t('txt_change_password')}
         </button>
+      </section>
+
+      <section className="card">
+        <h3>Passkeys</h3>
+        <div className="field-grid">
+          <label className="field">
+            <span>Name</span>
+            <input className="input" value={passkeyName} maxLength={64} onInput={(e) => setPasskeyName((e.currentTarget as HTMLInputElement).value)} />
+          </label>
+          <div className="field">
+            <span>&nbsp;</span>
+            <button type="button" className="btn btn-primary" onClick={() => void props.onRegisterPasskey(passkeyName || 'Passkey')}>
+              Register Passkey
+            </button>
+          </div>
+        </div>
+        <div className="stack">
+          {props.passkeys.map((item) => (
+            <div key={item.id} className="card" style={{ margin: 0 }}>
+              <div className="field-grid">
+                <label className="field">
+                  <span>Name</span>
+                  <input className="input" defaultValue={item.name} onBlur={(e) => void props.onRenamePasskey(item.id, (e.currentTarget as HTMLInputElement).value)} />
+                </label>
+                <div className="field">
+                  <span>Last used</span>
+                  <div className="muted-inline">{item.lastUsedAt || 'Never'}</div>
+                </div>
+              </div>
+              <button type="button" className="btn btn-danger" onClick={() => void props.onDeletePasskey(item.id)}>Delete</button>
+            </div>
+          ))}
+          {!props.passkeys.length && <div className="muted-inline">No passkeys yet.</div>}
+        </div>
       </section>
 
       <section className="card">
