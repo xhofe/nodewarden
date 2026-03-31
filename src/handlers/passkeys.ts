@@ -114,11 +114,6 @@ export async function handleBeginPasskeyRegistration(request: Request, env: Env,
       attestation: 'none',
       extensions: {
         credProps: true,
-        prf: {
-          eval: {
-            first: challenge,
-          },
-        },
       },
       excludeCredentials: passkeys.map((pk) => ({ type: 'public-key', id: pk.credentialId })),
     },
@@ -212,13 +207,6 @@ export async function handleBeginPasskeyLogin(request: Request, env: Env): Promi
       rpId: resolveWebAuthnRpId(request),
       timeout: 60000,
       userVerification: 'preferred',
-      extensions: {
-        prf: {
-          eval: {
-            first: challenge,
-          },
-        },
-      },
       allowCredentials: passkeys.map((pk) => ({ type: 'public-key', id: pk.credentialId })),
     },
   });
