@@ -17,6 +17,32 @@ function rpIdFromUrl(url: string): string {
   return new URL(url).hostname;
 }
 
+function resolveWebAuthnOrigin(request: Request): string {
+  const originHeader = request.headers.get('Origin');
+  if (originHeader) {
+    try {
+      return new URL(originHeader).origin;
+    } catch {
+      // ignore malformed Origin header and fall back to request URL origin
+    }
+  }
+
+  const refererHeader = request.headers.get('Referer');
+  if (refererHeader) {
+    try {
+      return new URL(refererHeader).origin;
+    } catch {
+      // ignore malformed Referer header and fall back to request URL origin
+    }
+  }
+
+  return new URL(request.url).origin;
+}
+
+function resolveWebAuthnRpId(request: Request): string {
+  return new URL(resolveWebAuthnOrigin(request)).hostname || rpIdFromUrl(request.url);
+}
+
 function twoFactorRequiredResponse(message: string = 'Two factor required.'): Response {
   return jsonResponse(
     {
@@ -64,7 +90,7 @@ export async function handleBeginPasskeyRegistration(request: Request, env: Env,
     publicKey: {
       challenge,
       rp: {
-        id: rpIdFromUrl(request.url),
+        id: resolveWebAuthnRpId(request),
         name: 'NodeWarden',
       },
       user: {
@@ -110,7 +136,7 @@ export async function handleFinishPasskeyRegistration(request: Request, env: Env
   if (!challengeRecord || challengeRecord.userId !== userId) return errorResponse('Challenge expired', 400);
 
   const parsedClientData = parseClientDataJSON(clientData);
-  const origin = new URL(request.url).origin;
+  const origin = resolveWebAuthnOrigin(request);
   if (!parsedClientData || parsedClientData.type !== 'webauthn.create' || parsedClientData.challenge !== challengeRecord.challenge || parsedClientData.origin !== origin) {
     return errorResponse('Passkey attestation invalid', 400);
   }
@@ -168,7 +194,7 @@ export async function handleBeginPasskeyLogin(request: Request, env: Env): Promi
     challengeId,
     publicKey: {
       challenge,
-      rpId: rpIdFromUrl(request.url),
+      rpId: resolveWebAuthnRpId(request),
       timeout: 60000,
       userVerification: 'preferred',
       allowCredentials: passkeys.map((pk) => ({ type: 'public-key', id: pk.credentialId })),
@@ -201,7 +227,7 @@ export async function handleFinishPasskeyLogin(request: Request, env: Env): Prom
   if (!challengeRecord) return identityErrorResponse('Passkey challenge expired', 'invalid_grant', 400);
 
   const parsedClientData = parseClientDataJSON(clientData);
-  const origin = new URL(request.url).origin;
+  const origin = resolveWebAuthnOrigin(request);
   if (!parsedClientData || parsedClientData.type !== 'webauthn.get' || parsedClientData.challenge !== challengeRecord.challenge || parsedClientData.origin !== origin) {
     return identityErrorResponse('Passkey assertion invalid', 'invalid_grant', 400);
   }
